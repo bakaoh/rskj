@@ -35,12 +35,15 @@ import org.ethereum.core.Repository;
 import org.ethereum.core.Transaction;
 import org.ethereum.crypto.ECKey;
 import org.ethereum.crypto.HashUtil;
+import org.ethereum.crypto.cryptohash.Blake2b;
 import org.ethereum.db.BlockStore;
 import org.ethereum.db.ReceiptStore;
 import org.ethereum.util.BIUtil;
 import org.ethereum.util.ByteUtil;
 
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -60,6 +63,7 @@ public class PrecompiledContracts {
     public static final String RIPEMPD160_ADDR_STR = "0000000000000000000000000000000000000003";
     public static final String IDENTITY_ADDR_STR = "0000000000000000000000000000000000000004";
     public static final String BIG_INT_MODEXP_ADDR_STR = "0000000000000000000000000000000000000005";
+    public static final String BLAKE2F_ADDR_STR = "0000000000000000000000000000000000000009";
     public static final String BRIDGE_ADDR_STR = "0000000000000000000000000000000001000006";
     public static final String REMASC_ADDR_STR = "0000000000000000000000000000000001000008";
     public static final String HD_WALLET_UTILS_ADDR_STR = "0000000000000000000000000000000001000009";
@@ -70,6 +74,7 @@ public class PrecompiledContracts {
     public static final DataWord RIPEMPD160_ADDR_DW = DataWord.valueFromHex(RIPEMPD160_ADDR_STR);
     public static final DataWord IDENTITY_ADDR_DW = DataWord.valueFromHex(IDENTITY_ADDR_STR);
     public static final DataWord BIG_INT_MODEXP_ADDR_DW = DataWord.valueFromHex(BIG_INT_MODEXP_ADDR_STR);
+    public static final DataWord BLAKE2F_ADDR_DW = DataWord.valueFromHex(BLAKE2F_ADDR_STR);
     public static final DataWord BRIDGE_ADDR_DW = DataWord.valueFromHex(BRIDGE_ADDR_STR);
     public static final DataWord REMASC_ADDR_DW = DataWord.valueFromHex(REMASC_ADDR_STR);
     public static final DataWord HD_WALLET_UTILS_ADDR_DW = DataWord.valueFromHex(HD_WALLET_UTILS_ADDR_STR);
@@ -80,6 +85,7 @@ public class PrecompiledContracts {
     public static final RskAddress RIPEMPD160_ADDR = new RskAddress(RIPEMPD160_ADDR_DW);
     public static final RskAddress IDENTITY_ADDR = new RskAddress(IDENTITY_ADDR_DW);
     public static final RskAddress BIG_INT_MODEXP_ADDR = new RskAddress(BIG_INT_MODEXP_ADDR_DW);
+    public static final RskAddress BLAKE2F_ADDR = new RskAddress(BLAKE2F_ADDR_DW);
     public static final RskAddress BRIDGE_ADDR = new RskAddress(BRIDGE_ADDR_DW);
     public static final RskAddress REMASC_ADDR = new RskAddress(REMASC_ADDR_DW);
     public static final RskAddress HD_WALLET_UTILS_ADDR = new RskAddress(HD_WALLET_UTILS_ADDR_STR);
@@ -91,6 +97,7 @@ public class PrecompiledContracts {
             RIPEMPD160_ADDR,
             IDENTITY_ADDR,
             BIG_INT_MODEXP_ADDR,
+            BLAKE2F_ADDR,
             BRIDGE_ADDR,
             REMASC_ADDR
     ));
@@ -108,6 +115,7 @@ public class PrecompiledContracts {
     private static Ripempd160 ripempd160 = new Ripempd160();
     private static Identity identity = new Identity();
     private static BigIntegerModexp bigIntegerModexp = new BigIntegerModexp();
+    private static Blake2F blake2F = new Blake2F();
     private final RskSystemProperties config;
     private final BridgeSupportFactory bridgeSupportFactory;
 
@@ -140,6 +148,9 @@ public class PrecompiledContracts {
         }
         if (address.equals(BIG_INT_MODEXP_ADDR_DW)) {
             return bigIntegerModexp;
+        }
+        if (address.equals(BLAKE2F_ADDR_DW)) {
+            return blake2F;
         }
         if (address.equals(REMASC_ADDR_DW)) {
             RemascConfig remascConfig = new RemascConfigFactory(RemascContract.REMASC_CONFIG).createRemascConfig(config.netName());
@@ -420,6 +431,66 @@ public class PrecompiledContracts {
             return BIUtil.toBI(bytes);
         }
 
+    }
+
+
+    public static class Blake2F extends PrecompiledContract {
+
+        private static int blake2FInputLength = 213;
+        private static byte blake2FFinalBlockBytes = 1;
+        private static byte blake2FNonFinalBlockBytes = 0;
+
+        @Override
+        public long getGasForData(byte[] data) {
+            if (data.length != blake2FInputLength) {
+                // Input is malformed, we can't read the number of rounds.
+                // Precompile can't be executed so we set its price to 0.
+                return 0;
+            }
+
+            ByteBuffer bb = ByteBuffer.wrap(data);
+            bb.order(ByteOrder.BIG_ENDIAN);
+            return bb.getInt() & 0x00000000ffffffffL;
+        }
+
+        @Override
+        public byte[] execute(byte[] data) {
+            if (data.length != blake2FInputLength) {
+                throw new IllegalArgumentException("input length for BLAKE2 F precompile should be exactly 213 bytes");
+            }
+            if (data[212] != blake2FNonFinalBlockBytes && data[212] != blake2FFinalBlockBytes) {
+                throw new IllegalArgumentException("incorrect final block indicator flag");
+            }
+
+            ByteBuffer bb = ByteBuffer.wrap(data);
+            bb.order(ByteOrder.BIG_ENDIAN);
+            long rounds = bb.getInt() & 0x00000000ffffffffL;
+
+            long[] h = new long[8];
+            bb.order(ByteOrder.LITTLE_ENDIAN);
+            for (int i = 0; i < 8; i++) {
+                h[i] = bb.getLong();
+            }
+
+            long[] m = new long[16];
+            for (int i = 0; i < 16; i++) {
+                m[i] = bb.getLong();
+            }
+
+            long[] t = new long[2];
+            t[0] = bb.getLong();
+            t[1] = bb.getLong();
+
+            boolean f = (data[212] == blake2FFinalBlockBytes);
+
+            Blake2b.F(h, m, t, f, rounds);
+            ByteBuffer output = ByteBuffer.allocate(64);
+            output.order(ByteOrder.LITTLE_ENDIAN);
+            for (int i = 0; i < 8; i++) {
+                output.putLong(h[i]);
+            }
+            return output.array();
+        }
     }
 
 }
